@@ -1,9 +1,11 @@
 import os
 import re
 import shutil
+import socket
 import time
 import uuid
 import zipfile
+import ipaddress
 from urllib.parse import urljoin, urlparse
 from io import BytesIO
 
@@ -23,8 +25,55 @@ os.makedirs(CLONED_SITES_DIR, exist_ok=True)
 
 BLOCKED_DOMAINS = [
     'facebook.com', 'google.com', 'twitter.com', 'instagram.com',
-    'linkedin.com', 'amazon.com', 'paypal.com', 'bank', 'gov'
+    'linkedin.com', 'amazon.com', 'paypal.com', 'bank', 'gov',
+    'metadata.google.internal', '169.254.169.254'
 ]
+
+PRIVATE_IP_RANGES = [
+    ipaddress.ip_network('10.0.0.0/8'),
+    ipaddress.ip_network('172.16.0.0/12'),
+    ipaddress.ip_network('192.168.0.0/16'),
+    ipaddress.ip_network('127.0.0.0/8'),
+    ipaddress.ip_network('169.254.0.0/16'),
+    ipaddress.ip_network('0.0.0.0/8'),
+    ipaddress.ip_network('100.64.0.0/10'),
+    ipaddress.ip_network('198.18.0.0/15'),
+    ipaddress.ip_network('::1/128'),
+    ipaddress.ip_network('fc00::/7'),
+    ipaddress.ip_network('fe80::/10'),
+]
+
+def is_private_ip(ip_str):
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        for network in PRIVATE_IP_RANGES:
+            if ip in network:
+                return True
+        return False
+    except ValueError:
+        return True
+
+def resolve_and_check_url(url):
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.netloc.split(':')[0]
+        
+        if hostname.replace('.', '').isdigit() or ':' in hostname:
+            if is_private_ip(hostname):
+                return False, "Cannot access private/internal IP addresses"
+        
+        try:
+            ip_addresses = socket.getaddrinfo(hostname, None)
+            for addr_info in ip_addresses:
+                ip = addr_info[4][0]
+                if is_private_ip(ip):
+                    return False, "Cannot access private/internal IP addresses"
+        except socket.gaierror:
+            return False, "Could not resolve hostname"
+        
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
 def is_valid_url(url):
     try:
@@ -128,7 +177,7 @@ class WebsiteCloner:
             
             if depth < 1:
                 for link in soup.find_all('a', href=True):
-                    href = link['href']
+                    href = str(link['href'])
                     full_url = urljoin(url, href)
                     parsed = urlparse(full_url)
                     
@@ -239,6 +288,10 @@ def clone_website():
     
     if is_blocked_domain(url):
         return jsonify({'success': False, 'error': 'This domain cannot be cloned for security reasons'}), 403
+    
+    is_safe, error_msg = resolve_and_check_url(url)
+    if not is_safe:
+        return jsonify({'success': False, 'error': error_msg}), 403
     
     clone_id = str(uuid.uuid4())[:8]
     
